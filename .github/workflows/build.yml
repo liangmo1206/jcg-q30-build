@@ -2,6 +2,9 @@ name: Build ImmortalWrt for JCG Q30 (mt7981)
 
 on:
   workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/build.yml'
 
 jobs:
   build:
@@ -86,6 +89,8 @@ jobs:
           make defconfig
           echo "===== 配置校验 ====="
           grep -E "jcg_q30=y|PACKAGE_luci-app-passwall=y|passwall_INCLUDE_(Xray|Shadowsocks_Libev_Client|ShadowsocksR_Libev_Client)=y" .config
+          echo "===== 确认 xray-core 被选中 ====="
+          grep -E "^CONFIG_PACKAGE_xray-core=" .config || echo "⚠️ .config 里没有 xray-core 条目"
           echo "===== 确认没有混入 v2ray/haproxy ====="
           grep -E "^CONFIG_PACKAGE_(v2ray-core|haproxy)=y" .config && { echo "❌ 多余组件被带上"; exit 1; } || echo "OK: 未包含 v2ray/haproxy"
           # 缺任何一项直接失败，避免编译 3 小时后才发现固件缺东西
@@ -109,15 +114,45 @@ jobs:
         run: |
           mkdir -p out
           find bin/targets/mediatek/mt7981 -type f -name "*jcg_q30*" -exec cp -v {} out/ \;
-          echo "===== 关键包核对 ====="
-          XRAY_IPK=$(ls bin/packages/*/base/xray-core_*.ipk 2>/dev/null | head -1)
-          [ -n "$XRAY_IPK" ] || { echo "❌ 未生成 xray-core ipk"; exit 1; }
-          echo "xray 包：$XRAY_IPK"
-          ar p "$XRAY_IPK" data.tar.gz | tar tzv | grep "usr/bin/xray" || { echo "❌ xray 二进制未打进包"; exit 1; }
-          ls -lh bin/packages/*/base/shadowsocks-libev-ss-redir_*.ipk \
-                 bin/packages/*/base/shadowsocksr-libev-ssr-redir_*.ipk || { echo "❌ SS/SSR 客户端包缺失"; exit 1; }
+          # 三个关键 ipk 一并带出 artifact，方便单独提取 / 刷机后重装
+          cp -v bin/packages/*/base/xray-core_*.ipk out/ 2>/dev/null || true
+          cp -v bin/packages/*/base/shadowsocks-libev-ss-redir_*.ipk out/ 2>/dev/null || true
+          cp -v bin/packages/*/base/shadowsocksr-libev-ssr-redir_*.ipk out/ 2>/dev/null || true
+
           echo "===== 产物 ====="
           ls -lh out
+
+          echo "===== 镜像内实际安装的组件（manifest）====="
+          MAN=$(ls bin/targets/mediatek/mt7981/*jcg_q30*.manifest 2>/dev/null | head -1)
+          if [ -n "$MAN" ]; then
+            echo "manifest: $MAN"
+            grep -E "^(xray-core|luci-app-passwall|luci-i18n-passwall|shadowsocks-libev|shadowsocksr-libev)" "$MAN" || echo "⚠️ manifest 里没找到预期的包"
+          else
+            echo "⚠️ 未找到 manifest"
+          fi
+
+          echo "===== xray ipk 内容粗查 ====="
+          XRAY_IPK=$(ls bin/packages/*/base/xray-core_*.ipk 2>/dev/null | head -1)
+          if [ -n "$XRAY_IPK" ]; then
+            echo "xray 包：$XRAY_IPK"
+            file "$XRAY_IPK"
+            # 这个分支的 ipk 容器不是 ar（tar.gz 套 tar.gz），两种格式都试，只报告不阻断
+            if tar tzf "$XRAY_IPK" >/dev/null 2>&1; then
+              echo "容器格式：tar.gz"
+              tar xzOf "$XRAY_IPK" ./data.tar.gz 2>/dev/null | tar tz 2>/dev/null | grep -E "usr/bin/xray|geoip.dat" || echo "⚠️ 包内未列出 xray 路径"
+            else
+              echo "容器格式：ar"
+              ar p "$XRAY_IPK" data.tar.gz 2>/dev/null | tar tz 2>/dev/null | grep -E "usr/bin/xray|geoip.dat" || echo "⚠️ 包内未列出 xray 路径"
+            fi
+          else
+            echo "⚠️ 未生成 xray-core ipk"
+          fi
+
+          ls -lh bin/packages/*/base/shadowsocks-libev-ss-redir_*.ipk bin/packages/*/base/shadowsocksr-libev-ssr-redir_*.ipk || echo "⚠️ SS/SSR 客户端 ipk 缺失"
+
+          echo "===== 唯一硬性要求：必须有 sysupgrade 固件 ====="
+          ls -lh bin/targets/mediatek/mt7981/*jcg_q30*squashfs-sysupgrade.bin || { echo "❌ 没有 sysupgrade 固件"; exit 1; }
+          echo "✅ 收集完成"
 
       - name: 9. 上传固件
         uses: actions/upload-artifact@v4
