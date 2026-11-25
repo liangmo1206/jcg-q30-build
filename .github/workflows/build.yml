@@ -29,12 +29,6 @@ jobs:
           path: openwrt
           fetch-depth: 1
 
-      - name: 2.5 取本仓库辅助文件到 ci/（xray-core 替换包）
-        uses: actions/checkout@v4
-        with:
-          path: ci
-          fetch-depth: 1
-
       - name: 3. 安装编译依赖
         run: |
           sudo apt-get update
@@ -53,8 +47,12 @@ jobs:
           # 21.02 的 Go 工具链编不了新版 Xray，改为安装官方 arm64 静态二进制；
           # 包名仍为 xray-core，PassWall 的依赖和组件检测都能正常识别。
           rm -rf package/feeds/packages/xray-core
-          cp -r ../ci/xray-core package/xray-core
           mkdir -p package/xray-core/files
+          # 包定义以 base64 内联，避免网页编辑把 recipe 的 TAB 变成空格
+          echo 'IyDpooTnvJbor5EgWHJheSDlhoXmoLjvvIjlrpjmlrkgdjI2LjExLjkgLyBsaW51eC1hcm02NO+8iQojCiMg6IOM5pmv77yaSW1tb3J0YWxXcnQgMjEuMDIg55qEIEdvIOW3peWFt+mTvueJiOacrOi/h+S9ju+8jOaXoOazleS7jua6kOeggee8luivkeaWsOeJiCBYcmF544CCCiMg6L+Z6YeM55u05o6l5a6J6KOFIFhUTFMg5a6Y5pa5IHJlbGVhc2Ug55qE6Z2Z5oCB5LqM6L+b5Yi277yI5LiO6Lev55Sx5Zmo546w6KOF54mI5pys5LiA6Ie077yJ77yMCiMg5YyF5ZCN5rK/55SoIHhyYXktY29yZe+8jOS7peS+v+a7oei2syBsdWNpLWFwcC1wYXNzd2FsbCDnmoTkvp3otZbkuI7nu4Tku7bmo4DmtYvjgIIKaW5jbHVkZSAkKFRPUERJUikvcnVsZXMubWsKClBLR19OQU1FOj14cmF5LWNvcmUKUEtHX1ZFUlNJT046PTI2LjExLjkKUEtHX1JFTEVBU0U6PTEKClBLR19MSUNFTlNFOj1NUEwtMi4wClBLR19NQUlOVEFJTkVSOj1sb2NhbC1idWlsZAoKaW5jbHVkZSAkKElOQ0xVREVfRElSKS9wYWNrYWdlLm1rCgpkZWZpbmUgUGFja2FnZS94cmF5LWNvcmUKICBTRUNUSU9OOj1uZXQKICBDQVRFR09SWTo9TmV0d29yawogIFRJVExFOj1YcmF5IGNvcmUgKHByZWJ1aWx0IDI2LjExLjksIGxpbnV4L2FybTY0KQogIFVSTDo9aHR0cHM6Ly9naXRodWIuY29tL1hUTFMvWHJheS1jb3JlCiAgREVQRU5EUzo9QGFhcmNoNjQKZW5kZWYKCmRlZmluZSBQYWNrYWdlL3hyYXktY29yZS9kZXNjcmlwdGlvbgogUHJlYnVpbHQgWHJheSBjb3JlIGJpbmFyeSBmcm9tIHRoZSBvZmZpY2lhbCByZWxlYXNlLCBtYXRjaGluZyB0aGUgdmVyc2lvbgogYWxyZWFkeSBydW5uaW5nIG9uIHRoZSBKQ0cgUTMwIHJvdXRlci4KZW5kZWYKCmRlZmluZSBCdWlsZC9QcmVwYXJlCglta2RpciAtcCAkKFBLR19CVUlMRF9ESVIpCgkkKENQKSAuL2ZpbGVzLy4gJChQS0dfQlVJTERfRElSKS8KZW5kZWYKCmRlZmluZSBCdWlsZC9Db21waWxlCmVuZGVmCgpkZWZpbmUgUGFja2FnZS94cmF5LWNvcmUvaW5zdGFsbAoJJChJTlNUQUxMX0RJUikgJCgxKS91c3IvYmluCgkkKElOU1RBTExfQklOKSAkKFBLR19CVUlMRF9ESVIpL3hyYXkgJCgxKS91c3IvYmluL3hyYXkKCSQoSU5TVEFMTF9ESVIpICQoMSkvdXNyL3NoYXJlL3hyYXkKCSQoSU5TVEFMTF9EQVRBKSAkKFBLR19CVUlMRF9ESVIpL2dlb2lwLmRhdCAkKDEpL3Vzci9zaGFyZS94cmF5L2dlb2lwLmRhdAoJJChJTlNUQUxMX0RBVEEpICQoUEtHX0JVSUxEX0RJUikvZ2Vvc2l0ZS5kYXQgJCgxKS91c3Ivc2hhcmUveHJheS9nZW9zaXRlLmRhdAplbmRlZgoKJChldmFsICQoY2FsbCBCdWlsZFBhY2thZ2UseHJheS1jb3JlKSkK' \
+            | base64 -d > package/xray-core/Makefile
+          grep -qP '^\t' package/xray-core/Makefile || { echo "❌ Makefile 缩进不是 TAB"; exit 1; }
+          head -4 package/xray-core/Makefile
           curl -fsSL -o /tmp/xray.zip \
             https://github.com/XTLS/Xray-core/releases/download/v26.11.9/Xray-linux-arm64-v8a.zip
           unzip -o -q /tmp/xray.zip -d package/xray-core/files
