@@ -1,4 +1,4 @@
-name: Build ImmortalWrt for JCG Q30 (mt7981)
+name: Build ImmortalWrt for JCG Q30 Pro (mt7981)
 
 on:
   workflow_dispatch:
@@ -66,6 +66,28 @@ jobs:
           test -f package/xray-core/files/geosite.dat || { echo "❌ 缺少 geosite.dat"; exit 1; }
           echo "✅ xray 预编译包就位"
 
+      - name: 4.6 型号改名为 Q30 Pro（只改显示名，不动 compatible）
+        run: |
+          # 硬件实际是 Q30 Pro，上游把型号写成了 Q30 / MR3000D-CIq。
+          # 这两处只影响界面与元数据里显示的名字：
+          #   ① DTS 的 model      → /tmp/sysinfo/model，LuCI 顶栏显示的就是它
+          #   ② image 的 DEVICE_MODEL → 镜像元数据里的 model 字段
+          # 关键的 compatible "jcg,q30" 与 SUPPORTED_DEVICES 一律保持原样，
+          # 否则 sysupgrade 会因为设备不匹配而拒绝刷机。
+          DTS=target/linux/mediatek/files-5.4/arch/arm64/boot/dts/mediatek/mt7981-jcg-q30.dts
+          sed -i 's|model = "[^"]*Q30[^"]*";|model = "JCG Q30 Pro";|' "$DTS"
+          sed -i 's|^  DEVICE_MODEL := Q30$|  DEVICE_MODEL := Q30 Pro|' target/linux/mediatek/image/mt7981.mk
+
+          echo "===== 改名结果 ====="
+          grep -n 'model = ' "$DTS"
+          grep -nE 'DEVICE_(VENDOR|MODEL|DTS)|SUPPORTED_DEVICES' target/linux/mediatek/image/mt7981.mk | sed -n '/Q30/,+3p'
+          # 闸门：型号必须改到，兼容串必须没被碰
+          grep -q 'model = "JCG Q30 Pro";' "$DTS" || { echo "❌ DTS model 未改为 Q30 Pro"; exit 1; }
+          grep -q '^  DEVICE_MODEL := Q30 Pro$' target/linux/mediatek/image/mt7981.mk || { echo "❌ DEVICE_MODEL 未改为 Q30 Pro"; exit 1; }
+          grep -q 'compatible = "jcg,q30"' "$DTS" || { echo "❌ compatible 被误改，这会破坏 sysupgrade 兼容性"; exit 1; }
+          grep -q 'SUPPORTED_DEVICES := jcg,q30' target/linux/mediatek/image/mt7981.mk || { echo "❌ SUPPORTED_DEVICES 被误改"; exit 1; }
+          echo "✅ 型号已改为 Q30 Pro，兼容串保持 jcg,q30"
+
       - name: 5. 生成配置（PassWall + 在用服务 + 广告拦截 + 音乐解锁）
         run: |
           cp defconfig/mt7981-ax3000.config .config
@@ -91,11 +113,29 @@ jobs:
           # alist / frpc / zerotier / ddns-go / netdata 在本机都是空配置没跑起来，
           # easymesh 只有 LuCI 空壳、后端包不存在，一律不编入。
           for p in \
-            luci-app-mtk luci-app-qos qos-scripts luci-app-wol luci-app-arpbind \
+            luci-app-qos qos-scripts luci-app-wol luci-app-arpbind \
             luci-app-ramfree luci-app-filetransfer luci-app-uhttpd \
             luci-app-nlbwmon nlbwmon dawn default-settings-chn ; do
             echo "CONFIG_PACKAGE_${p}=y" >> .config
           done
+
+          # ---------- 无线：必须与现固件同一套架构 ----------
+          # 本机用的是 wifi-profile + luci-app-mtk：以 /etc/wireless/*.dat 为唯一事实来源，
+          # LuCI 直接改 dat（bypass uci），没有 /etc/config/wireless。
+          # 上游 defconfig 默认的 mtwifi-cfg 是另一套架构：以 /etc/config/wireless 为准，
+          # 首次启动会自动生成 ImmortalWrt-2.4G/5G + 无密码的默认 SSID，
+          # 并把 dat 里的 SSID/密码覆盖掉 —— 两套互斥（mtwifi-cfg 带 @!PACKAGE_luci-app-mtk），
+          # 选错就等于刷完丢 WiFi 配置，所以这里显式锁死。
+          echo 'CONFIG_PACKAGE_wifi-profile=y' >> .config
+          echo 'CONFIG_PACKAGE_wifi-dats=y' >> .config
+          echo 'CONFIG_PACKAGE_luci-app-mtk=y' >> .config
+          echo 'CONFIG_WIFI_NORMAL_SETTING=y' >> .config
+          echo '# CONFIG_PACKAGE_mtwifi-cfg is not set' >> .config
+          echo '# CONFIG_PACKAGE_luci-app-mtwifi-cfg is not set' >> .config
+          echo '# CONFIG_PACKAGE_luci-i18n-mtwifi-cfg-zh-cn is not set' >> .config
+          # 驱动版本用上游默认 7.6.7.3（不改成 7.6.6.1：warp 硬件加速固定 2025-04 版，
+          # 与旧驱动配对未经验证；而 wifi-dats 对两个版本只提供同一套 .dat 模板，
+          # 现有 /etc/wireless/*.dat 在 7.6.7.3 下可直接使用）
           # 中文界面：luci-i18n-* 是 HIDDEN 包（DEFAULT:=LUCI_LANG_$(2)），
           # 直接写 CONFIG_PACKAGE_luci-i18n-xxx=y 会被 defconfig 忽略，
           # 必须打开语言开关，所有已选应用的中文包才会自动跟上。
@@ -117,7 +157,9 @@ jobs:
           echo "--- xray / node ---"
           grep -E "^CONFIG_PACKAGE_(xray-core|node)=" .config || true
           echo "--- 新加的服务 ---"
-          grep -E "^CONFIG_PACKAGE_(luci-app-adblock|luci-app-unblockneteasemusic|luci-app-mtk|luci-app-qos|dawn|nlbwmon)=" .config || true
+          grep -E "^CONFIG_PACKAGE_(luci-app-adblock|luci-app-unblockneteasemusic|luci-app-qos|dawn|nlbwmon)=" .config || true
+          echo "--- 无线架构（必须 wifi-profile + luci-app-mtk，且不能有 mtwifi-cfg）---"
+          grep -E "^CONFIG_PACKAGE_(wifi-profile|wifi-dats|luci-app-mtk|mtwifi-cfg|luci-app-mtwifi-cfg)=" .config || true
           echo "--- 中文界面 ---"
           grep -E "^CONFIG_LUCI_LANG_zh_Hans=|^CONFIG_PACKAGE_(default-settings-chn|luci-i18n-base-zh-cn)=" .config || true
           echo "--- 确认没有混入 v2ray/haproxy ---"
@@ -131,11 +173,17 @@ jobs:
             "^CONFIG_PACKAGE_luci-app-passwall_INCLUDE_ShadowsocksR_Libev_Client=y" \
             "^CONFIG_PACKAGE_luci-app-adblock=y" \
             "^CONFIG_PACKAGE_luci-app-unblockneteasemusic=y" \
+            "^CONFIG_PACKAGE_wifi-profile=y" \
+            "^CONFIG_PACKAGE_luci-app-mtk=y" \
             "^CONFIG_LUCI_LANG_zh_Hans=y" \
             "^CONFIG_PACKAGE_luci-i18n-base-zh-cn=y" \
             "^CONFIG_PACKAGE_default-settings-chn=y" ; do
             grep -q "$g" .config || { echo "❌ 缺少配置项: $g"; exit 1; }
           done
+          # 反向闸门：给不能同时选上 mtwifi-cfg，否则无线配置会被重置成默认开放 SSID
+          if grep -qE "^CONFIG_PACKAGE_(mtwifi-cfg|luci-app-mtwifi-cfg)=y" .config; then
+            echo "❌ 无线架构冲突：mtwifi-cfg 与 luci-app-mtk 不能共存"; exit 1
+          fi
           grep -q "jcg_q30=y" .config || { echo "❌ jcg_q30 未启用"; exit 1; }
           echo "✅ 配置校验通过"
 
@@ -143,7 +191,7 @@ jobs:
         run: |
           # files/ 的内容在打包镜像时会覆盖到 rootfs 最上层，
           # 优先级高于软件包自带的同名文件，而且不占 overlay。
-          mkdir -p files/etc/uci-defaults files/usr/share/passwall/rules
+          mkdir -p files/etc/uci-defaults files/usr/share/passwall/rules files/lib/upgrade/keep.d
 
           cat > files/etc/uci-defaults/99-zz-jcg-lan <<'EOS'
           #!/bin/sh
@@ -175,6 +223,14 @@ jobs:
           cat files/etc/uci-defaults/99-zz-jcg-lan
           echo "--- direct_ip ---"
           cat files/usr/share/passwall/rules/direct_ip
+
+          # 让以后的每次 sysupgrade 都保留 /etc/wireless/（SSID/信道/功率全在这里）。
+          # 现固件本来就带这条 keep 规则，所以这次刷机不会丢；写进新固件是为了以后不再依赖旧系统。
+          cat > files/lib/upgrade/keep.d/wifi-profile <<'EOS'
+          /etc/wireless/
+          EOS
+          echo "--- keep.d/wifi-profile ---"
+          cat files/lib/upgrade/keep.d/wifi-profile
 
       - name: 6. 下载源码包
         run: |
@@ -219,7 +275,7 @@ jobs:
 
           echo "===== 镜像内关键组件核对 ====="
           FAIL=0
-          for p in luci-app-passwall xray-core shadowsocks-libev-ss-redir shadowsocksr-libev-ssr-redir luci-app-adblock luci-app-unblockneteasemusic node; do
+          for p in luci-app-passwall xray-core shadowsocks-libev-ss-redir shadowsocksr-libev-ssr-redir luci-app-adblock luci-app-unblockneteasemusic node wifi-profile wifi-dats luci-app-mtk; do
             if grep -q "^Package: ${p}$" out/packages-installed.txt 2>/dev/null; then
               echo "  ✅ ${p}"
             else
@@ -240,6 +296,6 @@ jobs:
       - name: 9. 上传固件
         uses: actions/upload-artifact@v4
         with:
-          name: immortalwrt-jcg_q30
+          name: immortalwrt-jcg_q30-pro
           path: openwrt/out/*
           if-no-files-found: error
