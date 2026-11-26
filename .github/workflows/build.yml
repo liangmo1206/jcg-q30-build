@@ -93,13 +93,13 @@ jobs:
           for p in \
             luci-app-mtk luci-app-qos qos-scripts luci-app-wol luci-app-arpbind \
             luci-app-ramfree luci-app-filetransfer luci-app-uhttpd \
-            luci-app-nlbwmon nlbwmon dawn default-settings-chn \
-            luci-i18n-base-zh-cn luci-i18n-firewall-zh-cn luci-i18n-opkg-zh-cn \
-            luci-i18n-qos-zh-cn luci-i18n-wol-zh-cn luci-i18n-arpbind-zh-cn \
-            luci-i18n-ramfree-zh-cn luci-i18n-filetransfer-zh-cn \
-            luci-i18n-nlbwmon-zh-cn luci-i18n-uhttpd-zh-cn ; do
+            luci-app-nlbwmon nlbwmon dawn default-settings-chn ; do
             echo "CONFIG_PACKAGE_${p}=y" >> .config
           done
+          # 中文界面：luci-i18n-* 是 HIDDEN 包（DEFAULT:=LUCI_LANG_$(2)），
+          # 直接写 CONFIG_PACKAGE_luci-i18n-xxx=y 会被 defconfig 忽略，
+          # 必须打开语言开关，所有已选应用的中文包才会自动跟上。
+          echo 'CONFIG_LUCI_LANG_zh_Hans=y' >> .config
           # 本机用的是 qos-scripts，不是 MTK 的 eqos，避免两套 tc 打架
           echo 'CONFIG_PACKAGE_luci-app-eqos-mtk=n' >> .config
 
@@ -118,6 +118,8 @@ jobs:
           grep -E "^CONFIG_PACKAGE_(xray-core|node)=" .config || true
           echo "--- 新加的服务 ---"
           grep -E "^CONFIG_PACKAGE_(luci-app-adblock|luci-app-unblockneteasemusic|luci-app-mtk|luci-app-qos|dawn|nlbwmon)=" .config || true
+          echo "--- 中文界面 ---"
+          grep -E "^CONFIG_LUCI_LANG_zh_Hans=|^CONFIG_PACKAGE_(default-settings-chn|luci-i18n-base-zh-cn)=" .config || true
           echo "--- 确认没有混入 v2ray/haproxy ---"
           grep -E "^CONFIG_PACKAGE_(v2ray-core|haproxy)=y" .config && { echo "❌ 多余组件被带上"; exit 1; } || echo "OK: 未包含 v2ray/haproxy"
 
@@ -128,7 +130,10 @@ jobs:
             "^CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Shadowsocks_Libev_Client=y" \
             "^CONFIG_PACKAGE_luci-app-passwall_INCLUDE_ShadowsocksR_Libev_Client=y" \
             "^CONFIG_PACKAGE_luci-app-adblock=y" \
-            "^CONFIG_PACKAGE_luci-app-unblockneteasemusic=y" ; do
+            "^CONFIG_PACKAGE_luci-app-unblockneteasemusic=y" \
+            "^CONFIG_LUCI_LANG_zh_Hans=y" \
+            "^CONFIG_PACKAGE_luci-i18n-base-zh-cn=y" \
+            "^CONFIG_PACKAGE_default-settings-chn=y" ; do
             grep -q "$g" .config || { echo "❌ 缺少配置项: $g"; exit 1; }
           done
           grep -q "jcg_q30=y" .config || { echo "❌ jcg_q30 未启用"; exit 1; }
