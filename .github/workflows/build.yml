@@ -66,10 +66,11 @@ jobs:
           test -f package/xray-core/files/geosite.dat || { echo "❌ 缺少 geosite.dat"; exit 1; }
           echo "✅ xray 预编译包就位"
 
-      - name: 5. 生成配置（jcg_q30 + PassWall 4.68-1 + SS/SSR 客户端）
+      - name: 5. 生成配置（PassWall + 在用服务 + 广告拦截 + 音乐解锁）
         run: |
           cp defconfig/mt7981-ax3000.config .config
-          # 上游 defconfig 不启用 PassWall，这里显式加上；版本与本机一致（4.68-1）
+
+          # ---------- PassWall 本体（版本与本机一致 4.68-1）----------
           # INCLUDE_Xray 拉 xray-core（已被 4.5 换成 26.11.9 预编译包）
           echo 'CONFIG_PACKAGE_luci-app-passwall=y' >> .config
           echo 'CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Xray=y' >> .config
@@ -77,7 +78,6 @@ jobs:
           # 只加客户端（连节点用），不加服务端
           echo 'CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Shadowsocks_Libev_Client=y' >> .config
           echo 'CONFIG_PACKAGE_luci-app-passwall_INCLUDE_ShadowsocksR_Libev_Client=y' >> .config
-          # 其余重组件关掉：v2ray/haproxy/ss-rust/服务端等用不到，省固件体积
           for opt in V2ray V2ray_Plugin V2ray_Geodata Haproxy Brook \
                      Shadowsocks_Libev_Server \
                      Shadowsocks_Rust_Client Shadowsocks_Rust_Server \
@@ -86,20 +86,90 @@ jobs:
                      Hysteria NaiveProxy Xray_Plugin; do
             echo "CONFIG_PACKAGE_luci-app-passwall_INCLUDE_${opt}=n" >> .config
           done
+
+          # ---------- 补齐本机真实在用的服务 ----------
+          # alist / frpc / zerotier / ddns-go / netdata 在本机都是空配置没跑起来，
+          # easymesh 只有 LuCI 空壳、后端包不存在，一律不编入。
+          for p in \
+            luci-app-mtk luci-app-qos qos-scripts luci-app-wol luci-app-arpbind \
+            luci-app-ramfree luci-app-filetransfer luci-app-uhttpd \
+            luci-app-nlbwmon nlbwmon dawn default-settings-chn \
+            luci-i18n-base-zh-cn luci-i18n-firewall-zh-cn luci-i18n-opkg-zh-cn \
+            luci-i18n-qos-zh-cn luci-i18n-wol-zh-cn luci-i18n-arpbind-zh-cn \
+            luci-i18n-ramfree-zh-cn luci-i18n-filetransfer-zh-cn \
+            luci-i18n-nlbwmon-zh-cn luci-i18n-uhttpd-zh-cn ; do
+            echo "CONFIG_PACKAGE_${p}=y" >> .config
+          done
+          # 本机用的是 qos-scripts，不是 MTK 的 eqos，避免两套 tc 打架
+          echo 'CONFIG_PACKAGE_luci-app-eqos-mtk=n' >> .config
+
+          # ---------- 广告拦截：adblock（dnsmasq 层，不动 PassWall 的 DNS 链路）----------
+          echo 'CONFIG_PACKAGE_luci-app-adblock=y' >> .config
+          echo 'CONFIG_PACKAGE_luci-i18n-adblock-zh-cn=y' >> .config
+
+          # ---------- 音乐会员解锁：官方 LuCI（依赖 node）----------
+          echo 'CONFIG_PACKAGE_luci-app-unblockneteasemusic=y' >> .config
+
           make defconfig
+
           echo "===== 配置校验 ====="
           grep -E "jcg_q30=y|PACKAGE_luci-app-passwall=y|passwall_INCLUDE_(Xray|Shadowsocks_Libev_Client|ShadowsocksR_Libev_Client)=y" .config
-          echo "===== 确认 xray-core 被选中 ====="
-          grep -E "^CONFIG_PACKAGE_xray-core=" .config || echo "⚠️ .config 里没有 xray-core 条目"
-          echo "===== 确认没有混入 v2ray/haproxy ====="
+          echo "--- xray / node ---"
+          grep -E "^CONFIG_PACKAGE_(xray-core|node)=" .config || true
+          echo "--- 新加的服务 ---"
+          grep -E "^CONFIG_PACKAGE_(luci-app-adblock|luci-app-unblockneteasemusic|luci-app-mtk|luci-app-qos|dawn|nlbwmon)=" .config || true
+          echo "--- 确认没有混入 v2ray/haproxy ---"
           grep -E "^CONFIG_PACKAGE_(v2ray-core|haproxy)=y" .config && { echo "❌ 多余组件被带上"; exit 1; } || echo "OK: 未包含 v2ray/haproxy"
-          # 缺任何一项直接失败，避免编译 3 小时后才发现固件缺东西
-          grep -q "^CONFIG_PACKAGE_luci-app-passwall=y" .config || { echo "❌ PassWall 未启用"; exit 1; }
-          grep -q "^CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Xray=y" .config || { echo "❌ PassWall 的 Xray 未启用"; exit 1; }
-          grep -q "^CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Shadowsocks_Libev_Client=y" .config || { echo "❌ SS 客户端未启用"; exit 1; }
-          grep -q "^CONFIG_PACKAGE_luci-app-passwall_INCLUDE_ShadowsocksR_Libev_Client=y" .config || { echo "❌ SSR 客户端未启用"; exit 1; }
+
+          # 缺任何一项直接失败，避免编译 2 小时后才发现固件缺东西
+          for g in \
+            "^CONFIG_PACKAGE_luci-app-passwall=y" \
+            "^CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Xray=y" \
+            "^CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Shadowsocks_Libev_Client=y" \
+            "^CONFIG_PACKAGE_luci-app-passwall_INCLUDE_ShadowsocksR_Libev_Client=y" \
+            "^CONFIG_PACKAGE_luci-app-adblock=y" \
+            "^CONFIG_PACKAGE_luci-app-unblockneteasemusic=y" ; do
+            grep -q "$g" .config || { echo "❌ 缺少配置项: $g"; exit 1; }
+          done
           grep -q "jcg_q30=y" .config || { echo "❌ jcg_q30 未启用"; exit 1; }
           echo "✅ 配置校验通过"
+
+      - name: 5.5 注入默认 LAN 地址与 PassWall direct_ip
+        run: |
+          # files/ 的内容在打包镜像时会覆盖到 rootfs 最上层，
+          # 优先级高于软件包自带的同名文件，而且不占 overlay。
+          mkdir -p files/etc/uci-defaults files/usr/share/passwall/rules
+
+          cat > files/etc/uci-defaults/99-zz-jcg-lan <<'EOS'
+          #!/bin/sh
+          # LAN 地址与本机现状保持一致（zz 开头，排在 default-settings 之后执行）
+          uci set network.lan.ipaddr='192.168.123.1'
+          uci set network.lan.netmask='255.255.255.0'
+          uci commit network
+          uci set dhcp.lan.start='100'
+          uci set dhcp.lan.limit='150'
+          uci commit dhcp
+          exit 0
+          EOS
+          chmod +x files/etc/uci-defaults/99-zz-jcg-lan
+
+          # PassWall 的直连 IP 规则。这个文件属于软件包、不归 /etc/config 管，
+          # 所以 config 备份恢复不回来 —— 直接编进固件才不会再次丢失。
+          cat > files/usr/share/passwall/rules/direct_ip <<'EOS'
+          114.114.114.114
+          114.114.115.115
+          223.5.5.5
+          223.6.6.6
+          119.29.29.29
+          180.76.76.76
+          8.133.124.0/23
+          EOS
+
+          echo "===== 注入内容 ====="
+          echo "--- uci-defaults ---"
+          cat files/etc/uci-defaults/99-zz-jcg-lan
+          echo "--- direct_ip ---"
+          cat files/usr/share/passwall/rules/direct_ip
 
       - name: 6. 下载源码包
         run: |
@@ -114,44 +184,52 @@ jobs:
         run: |
           mkdir -p out
           find bin/targets/mediatek/mt7981 -type f -name "*jcg_q30*" -exec cp -v {} out/ \;
-          # 三个关键 ipk 一并带出 artifact，方便单独提取 / 刷机后重装
-          cp -v bin/packages/*/base/xray-core_*.ipk out/ 2>/dev/null || true
-          cp -v bin/packages/*/base/shadowsocks-libev-ss-redir_*.ipk out/ 2>/dev/null || true
-          cp -v bin/packages/*/base/shadowsocksr-libev-ssr-redir_*.ipk out/ 2>/dev/null || true
+          find bin/targets/mediatek/mt7981 -maxdepth 1 -type f \( -name "*.manifest" -o -name "config.buildinfo" \) -exec cp -v {} out/ \; 2>/dev/null || true
+
+          # 关键 ipk 也带进 artifact。
+          # 踩过的坑：feed 里的包落在 bin/packages/<arch>/packages/，
+          # 只有本地 package/ 目录下的包才在 bin/packages/<arch>/base/，
+          # 所以不能写死 base/，用 find 全树找。
+          find bin/packages -type f \( \
+                 -name 'xray-core_*.ipk' \
+                 -o -name 'shadowsocks-libev-ss-redir_*.ipk' \
+                 -o -name 'shadowsocks-libev-ss-local_*.ipk' \
+                 -o -name 'shadowsocksr-libev-ssr-redir_*.ipk' \
+                 -o -name 'shadowsocksr-libev-ssr-local_*.ipk' \
+                 -o -name 'adblock_*.ipk' \
+               \) -exec cp -v {} out/ \;
+
+          # 镜像内「实际安装」清单：build_dir 里的 opkg status 才是最权威的
+          STATUS=$(ls build_dir/target-*/root-*/usr/lib/opkg/status 2>/dev/null | head -1)
+          if [ -n "$STATUS" ]; then
+            cp -v "$STATUS" out/packages-installed.txt
+            echo "✅ 已导出镜像内安装清单"
+          else
+            echo "⚠️ 未找到 opkg status，退而用 .config 反推"
+            grep -E "^CONFIG_PACKAGE_[A-Za-z0-9._+-]+=y$" .config | sed 's/^CONFIG_PACKAGE_//;s/=y$//' > out/packages-installed.txt
+          fi
 
           echo "===== 产物 ====="
           ls -lh out
 
-          echo "===== 镜像内实际安装的组件（manifest）====="
-          MAN=$(ls bin/targets/mediatek/mt7981/*jcg_q30*.manifest 2>/dev/null | head -1)
-          if [ -n "$MAN" ]; then
-            echo "manifest: $MAN"
-            grep -E "^(xray-core|luci-app-passwall|luci-i18n-passwall|shadowsocks-libev|shadowsocksr-libev)" "$MAN" || echo "⚠️ manifest 里没找到预期的包"
-          else
-            echo "⚠️ 未找到 manifest"
-          fi
-
-          echo "===== xray ipk 内容粗查 ====="
-          XRAY_IPK=$(ls bin/packages/*/base/xray-core_*.ipk 2>/dev/null | head -1)
-          if [ -n "$XRAY_IPK" ]; then
-            echo "xray 包：$XRAY_IPK"
-            file "$XRAY_IPK"
-            # 这个分支的 ipk 容器不是 ar（tar.gz 套 tar.gz），两种格式都试，只报告不阻断
-            if tar tzf "$XRAY_IPK" >/dev/null 2>&1; then
-              echo "容器格式：tar.gz"
-              tar xzOf "$XRAY_IPK" ./data.tar.gz 2>/dev/null | tar tz 2>/dev/null | grep -E "usr/bin/xray|geoip.dat" || echo "⚠️ 包内未列出 xray 路径"
+          echo "===== 镜像内关键组件核对 ====="
+          FAIL=0
+          for p in luci-app-passwall xray-core shadowsocks-libev-ss-redir shadowsocksr-libev-ssr-redir luci-app-adblock luci-app-unblockneteasemusic node; do
+            if grep -q "^Package: ${p}$" out/packages-installed.txt 2>/dev/null; then
+              echo "  ✅ ${p}"
             else
-              echo "容器格式：ar"
-              ar p "$XRAY_IPK" data.tar.gz 2>/dev/null | tar tz 2>/dev/null | grep -E "usr/bin/xray|geoip.dat" || echo "⚠️ 包内未列出 xray 路径"
+              echo "  ❌ ${p} 不在清单里"
+              FAIL=1
             fi
-          else
-            echo "⚠️ 未生成 xray-core ipk"
-          fi
-
-          ls -lh bin/packages/*/base/shadowsocks-libev-ss-redir_*.ipk bin/packages/*/base/shadowsocksr-libev-ssr-redir_*.ipk || echo "⚠️ SS/SSR 客户端 ipk 缺失"
+          done
+          echo "--- 清单里的 LuCI 应用 ---"
+          grep "^Package: luci-app-" out/packages-installed.txt | sed 's/Package: //' | tr '\n' ' ' || true
+          echo
 
           echo "===== 唯一硬性要求：必须有 sysupgrade 固件 ====="
           ls -lh bin/targets/mediatek/mt7981/*jcg_q30*squashfs-sysupgrade.bin || { echo "❌ 没有 sysupgrade 固件"; exit 1; }
+
+          [ "$FAIL" -eq 0 ] || echo "⚠️ 有关键组件缺失，但仍上传产物供排查"
           echo "✅ 收集完成"
 
       - name: 9. 上传固件
