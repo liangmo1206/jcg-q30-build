@@ -71,27 +71,28 @@ jobs:
           test -f package/xray-core/files/geosite.dat || { echo "❌ 缺少 geosite.dat"; exit 1; }
           echo "✅ xray 预编译包就位"
 
-      - name: 4.6 型号改名为 Q30 Pro + 兼容 jcg,q30_pro 设备名
+      - name: 4.6 型号改名为 Q30 Pro + 兼容第三种设备名 jcg,q30-pro
         run: |
           # 硬件实际是 Q30 Pro，上游把型号写成了 Q30。
           # 两处只影响界面与元数据里显示的名字：
           #   ① DTS 的 model      → /tmp/sysinfo/model，LuCI 顶栏显示的就是它
           #   ② image 的 DEVICE_MODEL → 镜像元数据里的 model 字段
           #
-          # SUPPORTED_DEVICES 追加 jcg,q30_pro 的原因：
+          # SUPPORTED_DEVICES 追加 jcg,q30_pro / jcg,q30-pro 的原因：
           #   sysupgrade 只用 /tmp/sysinfo/board_name 与本列表逐个比对
           #   （见 /lib/upgrade/fwtool.sh 的 fwtool_check_image）。同一块板子
-          #   在不同固件里的命名并不统一：
+          #   在不同固件里的命名并不统一，实测三种写法都出现过：
           #     ImmortalWrt 21.02          → jcg,q30
-          #     雕牌 QWRT R23.x            → jcg,q30_pro   ← 本次踩到
+          #     雕牌 Kwrt 25.12            → jcg,q30-pro    ← 连字符（备用机实测）
+          #     部分第三方固件              → jcg,q30_pro    ← 下划线
           #     ImmortalWrt 23.05 ubootmod → jcg,q30-ubootmod（另一套布局，绝不能合并）
-          #   只写 jcg,q30 会让前者直接刷、后者被拒（必须 -F 强刷）。
-          #   合并 q30_pro 后两者都能直接刷，无需 -F。
+          #   只写 jcg,q30 会让后两者被拒（必须 -F 强刷）。
+          #   连字符、下划线两种别名都合并后，从任何一方刷过来都不再需要 -F。
           DTS=target/linux/mediatek/files-5.4/arch/arm64/boot/dts/mediatek/mt7981-jcg-q30.dts
           MK=target/linux/mediatek/image/mt7981.mk
           sed -i 's|model = "[^"]*Q30[^"]*";|model = "JCG Q30 Pro";|' "$DTS"
           sed -i 's|^  DEVICE_MODEL := Q30$|  DEVICE_MODEL := Q30 Pro|' "$MK"
-          sed -i 's|^  SUPPORTED_DEVICES := jcg,q30$|  SUPPORTED_DEVICES := jcg,q30 jcg,q30_pro|' "$MK"
+          sed -i 's|^  SUPPORTED_DEVICES := jcg,q30$|  SUPPORTED_DEVICES := jcg,q30 jcg,q30_pro jcg,q30-pro|' "$MK"
 
           echo "===== 改名结果 ====="
           grep -n 'model = ' "$DTS"
@@ -100,9 +101,9 @@ jobs:
           grep -q 'model = "JCG Q30 Pro";' "$DTS" || { echo "❌ DTS model 未改为 Q30 Pro"; exit 1; }
           grep -q '^  DEVICE_MODEL := Q30 Pro$' "$MK" || { echo "❌ DEVICE_MODEL 未改为 Q30 Pro"; exit 1; }
           grep -q 'compatible = "jcg,q30"' "$DTS" || { echo "❌ compatible 被误改，这会破坏 sysupgrade 兼容性"; exit 1; }
-          grep -q '^  SUPPORTED_DEVICES := jcg,q30 jcg,q30_pro$' "$MK" || { echo "❌ SUPPORTED_DEVICES 未同时兼容 jcg,q30 与 jcg,q30_pro"; exit 1; }
+          grep -q '^  SUPPORTED_DEVICES := jcg,q30 jcg,q30_pro jcg,q30-pro$' "$MK" || { echo "❌ SUPPORTED_DEVICES 未同时兼容 jcg,q30 / jcg,q30_pro / jcg,q30-pro"; exit 1; }
           grep -A6 'define Device/jcg_q30$' "$MK" | grep -q 'ubootmod' && { echo "❌ jcg_q30 设备块混入 ubootmod（分区布局不同，会变砖）"; exit 1; }
-          echo "✅ 型号已改为 Q30 Pro，兼容 jcg,q30 + jcg,q30_pro，未混入 ubootmod"
+          echo "✅ 型号已改为 Q30 Pro，兼容 jcg,q30 + jcg,q30_pro + jcg,q30-pro，未混入 ubootmod"
 
       - name: 4.7 去掉 PassWall 状态页的 Instagram 检测块
         run: |
@@ -510,14 +511,34 @@ jobs:
           fi
 
           # q30check：刷机前硬件指纹校验。sysupgrade 只认设备名，而同一块板子
-          # 在不同固件里可能被命名为 jcg,q30 / jcg,q30_pro / jcg,q30-ubootmod，
-          # 名字判断不了「这到底是不是同一块硬件、是不是同一套分区布局」。
-          # 本脚本直接读 SoC + NAND 容量 + MTD 分区表做比对，ubootmod 布局直接拒绝。
+          # 在不同固件里可能被命名为 jcg,q30 / jcg,q30-pro / jcg,q30_pro /
+          # jcg,q30-ubootmod，名字判断不了「这到底是不是同一块硬件、是不是同一
+          # 套分区布局」。本脚本按**分区名**比对 SoC + NAND + 各分区大小，
+          # 不按 mtd 序号比（各固件的 /proc/mtd 视图不同：有没有 08000000 的总
+          # 设备、分区名 BL2 还是 bl2）。ubootmod 布局直接拒绝。
           install -Dm755 ../q30check.sh files/usr/bin/q30check
           sh -n files/usr/bin/q30check || { echo "❌ q30check 语法错误"; exit 1; }
           test -x files/usr/bin/q30check || { echo "❌ q30check 权限错"; exit 1; }
           grep -q 'ubootmod' files/usr/bin/q30check || { echo "❌ q30check 未处理 ubootmod 布局"; exit 1; }
           echo "✅ q30check 就位：$(wc -l < files/usr/bin/q30check) 行"
+
+          # 回放闸门：两种真实 /proc/mtd 视图都必须判 MATCH，ubootmod 必须被拦。
+          #   a) ImmortalWrt 21.02：有 spi0.0 总设备、BL2/FIP 大写
+          #   b) Kwrt 25.12（备用机实测）：无总设备、bl2/fip 小写、board=jcg,q30-pro
+          #   c) ubootmod：ubi 变小、名字带 ubootmod
+          T=/tmp/q30t; rm -rf "$T"; mkdir -p "$T"
+          printf 'mtd0: 08000000 00020000 "spi0.0"\nmtd1: 00100000 00020000 "BL2"\nmtd2: 00080000 00020000 "u-boot-env"\nmtd3: 00200000 00020000 "Factory"\nmtd4: 00200000 00020000 "FIP"\nmtd5: 06e80000 00020000 "ubi"\n' > "$T/mtd-a"
+          printf 'jcg,q30\0mediatek,mt7981\0' > "$T/cmp-a"
+          printf 'mtd0: 00100000 00020000 "bl2"\nmtd1: 00080000 00020000 "u-boot-env"\nmtd2: 00200000 00020000 "Factory"\nmtd3: 00200000 00020000 "fip"\nmtd4: 06e80000 00020000 "ubi"\n' > "$T/mtd-b"
+          printf 'jcg,q30-pro\0mediatek,mt7981\0' > "$T/cmp-b"
+          printf 'mtd0: 05a80000 00020000 "ubi"\n' > "$T/mtd-c"
+          printf 'jcg,q30-ubootmod\0mediatek,mt7981\0' > "$T/cmp-c"
+          Q30_MTD="$T/mtd-a" Q30_COMPAT="$T/cmp-a" sh files/usr/bin/q30check >/dev/null || { echo "❌ q30check 误判 ImmortalWrt 视图"; exit 1; }
+          Q30_MTD="$T/mtd-b" Q30_COMPAT="$T/cmp-b" sh files/usr/bin/q30check >/dev/null || { echo "❌ q30check 误判 Kwrt 视图（jcg,q30-pro）"; exit 1; }
+          if Q30_MTD="$T/mtd-c" Q30_COMPAT="$T/cmp-c" sh files/usr/bin/q30check >/dev/null; then
+            echo "❌ q30check 未拦住 ubootmod"; exit 1
+          fi
+          echo "✅ q30check 两种视图回放通过，ubootmod 正确拦截"
 
           # adblock 规则源预设：21.02 的 adblock 4.1.3 里中国规则源叫 reg_cn，
           # 不叫 easylistchina（写错会被静默丢弃）。anti_ad 是广告主库。
