@@ -24,6 +24,11 @@ jobs:
           echo "===== 可用空间 ====="
           df -h /
 
+      - name: 2.0 取本仓库（提供 gamefix.sh 等随仓库文件）
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
       - name: 2. 获取上游源码到 openwrt/
         uses: actions/checkout@v4
         with:
@@ -147,8 +152,23 @@ jobs:
           echo 'CONFIG_PACKAGE_luci-app-adblock=y' >> .config
           echo 'CONFIG_PACKAGE_luci-i18n-adblock-zh-cn=y' >> .config
 
-          # ---------- 音乐会员解锁：官方 LuCI（依赖 node）----------
-          echo 'CONFIG_PACKAGE_luci-app-unblockneteasemusic=y' >> .config
+          # ---------- KMS 激活：vlmcsd（packages feed 自带，编译时自动匹配架构）----------
+          echo 'CONFIG_PACKAGE_vlmcsd=y' >> .config
+          # vlmcsd 的 feed 包不带 init / 不自启（Makefile 里那两行是注释掉的），
+          # 必须配 luci-app-vlmcsd：它提供 /etc/init.d/kms + Web 管理页，
+          # 并且启动时会把 srv-host=_vlmcs._tcp 写进 /etc/dnsmasq.conf 做自动发现。
+          echo 'CONFIG_PACKAGE_luci-app-vlmcsd=y' >> .config
+          echo 'CONFIG_PACKAGE_luci-i18n-vlmcsd-zh-cn=y' >> .config
+
+          # ---------- 界面：Argon 主题（与现网 192.168.123.1 完全一致）----------
+          # 现网那台也是 ImmortalWrt 21.02，argon 是刷完后手工 opkg 装的，从没进过固件。
+          # feed 的 themes/ 下就有，直接选上即可，约 +0.7MB。
+          echo 'CONFIG_PACKAGE_luci-theme-argon=y' >> .config
+
+          # ---------- 音乐会员解锁：改用 Go 版（payload 预编译二进制，不依赖 node）----------
+          # 官方 LuCI 版是 JavaScript，必须 node 常驻（30-60MB），256M 机上的冷备会 OOM。
+          # 这里关掉官方版，改用 payload/ 里的 UnblockNeteaseMusic-Go（单进程约 7MB）
+          echo '# CONFIG_PACKAGE_luci-app-unblockneteasemusic is not set' >> .config
 
           make defconfig
 
@@ -157,7 +177,16 @@ jobs:
           echo "--- xray / node ---"
           grep -E "^CONFIG_PACKAGE_(xray-core|node)=" .config || true
           echo "--- 新加的服务 ---"
-          grep -E "^CONFIG_PACKAGE_(luci-app-adblock|luci-app-unblockneteasemusic|luci-app-qos|dawn|nlbwmon)=" .config || true
+          grep -E "^CONFIG_PACKAGE_(luci-app-adblock|luci-app-qos|dawn|nlbwmon)=" .config || true
+          echo "--- 音乐解锁应为 Go 版（不走 node）---"
+          if grep -qE "^CONFIG_PACKAGE_luci-app-unblockneteasemusic=y" .config; then
+            echo "❌ 官方 node 版又被选上了，会多吃 30-60MB"; exit 1
+          fi
+          if grep -qE "^CONFIG_PACKAGE_node=y" .config; then
+            echo "⚠️  node 仍被其他组件依赖"; grep -E "^CONFIG_PACKAGE_node=y" .config
+          else
+            echo "OK: node 未进包"
+          fi
           echo "--- 无线架构（必须 wifi-profile + luci-app-mtk，且不能有 mtwifi-cfg）---"
           grep -E "^CONFIG_PACKAGE_(wifi-profile|wifi-dats|luci-app-mtk|mtwifi-cfg|luci-app-mtwifi-cfg)=" .config || true
           echo "--- 中文界面 ---"
@@ -172,7 +201,9 @@ jobs:
             "^CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Shadowsocks_Libev_Client=y" \
             "^CONFIG_PACKAGE_luci-app-passwall_INCLUDE_ShadowsocksR_Libev_Client=y" \
             "^CONFIG_PACKAGE_luci-app-adblock=y" \
-            "^CONFIG_PACKAGE_luci-app-unblockneteasemusic=y" \
+            "^CONFIG_PACKAGE_vlmcsd=y" \
+            "^CONFIG_PACKAGE_luci-app-vlmcsd=y" \
+            "^CONFIG_PACKAGE_luci-theme-argon=y" \
             "^CONFIG_PACKAGE_wifi-profile=y" \
             "^CONFIG_PACKAGE_luci-app-mtk=y" \
             "^CONFIG_LUCI_LANG_zh_Hans=y" \
@@ -180,7 +211,7 @@ jobs:
             "^CONFIG_PACKAGE_default-settings-chn=y" ; do
             grep -q "$g" .config || { echo "❌ 缺少配置项: $g"; exit 1; }
           done
-          # 反向闸门：给不能同时选上 mtwifi-cfg，否则无线配置会被重置成默认开放 SSID
+          # 反向闸门：绝不能同时选上 mtwifi-cfg，否则无线配置会被重置成默认开放 SSID
           if grep -qE "^CONFIG_PACKAGE_(mtwifi-cfg|luci-app-mtwifi-cfg)=y" .config; then
             echo "❌ 无线架构冲突：mtwifi-cfg 与 luci-app-mtk 不能共存"; exit 1
           fi
@@ -232,6 +263,184 @@ jobs:
           echo "--- keep.d/wifi-profile ---"
           cat files/lib/upgrade/keep.d/wifi-profile
 
+      - name: 5.6 注入音乐解锁 Go 版（vlmcsd 由 feed 直接编译）
+        run: |
+          # 音乐解锁走官方 release 的 linux-arm64 strip 版（1.6MB）。
+          # 不从仓库取二进制：省仓库体积、来源可追溯、避免 git 破坏 ELF。
+          # 21.02 自带的旧 Go 工具链编不了它，所以用 files/ 预编译覆盖层。
+          URL=https://github.com/cnsilvan/UnblockNeteaseMusic/releases/download/0.2.13/UnblockNeteaseMusic-linux-arm64.zip
+          curl -fsSL --retry 3 --retry-delay 2 -o /tmp/unm.zip "$URL"
+          rm -rf /tmp/unm && mkdir -p /tmp/unm
+          unzip -o -q /tmp/unm.zip -d /tmp/unm
+
+          install -Dm755 /tmp/unm/UnblockNeteaseMusic files/usr/bin/UnblockNeteaseMusic
+          install -Dm644 /tmp/unm/server.crt files/usr/share/UnblockNeteaseMusicGo/server.crt
+          install -Dm644 /tmp/unm/server.key files/usr/share/UnblockNeteaseMusicGo/server.key
+          install -Dm644 /tmp/unm/ca.crt     files/usr/share/UnblockNeteaseMusicGo/ca.crt
+
+          # 启动脚本：dnsmasq 把域名解析结果写进 ipset，iptables 把 80 重定向到 5200。
+          # 只劫持 80：实测 iOS 客户端接口走明文 HTTP；劫持 443 会因缺 CA 证书导致登录失败。
+          # 关键点：conf-dir 的变更必须 restart 才生效（reload 只发 SIGHUP，不重读配置文件）。
+          mkdir -p files/etc/init.d
+          cat > files/etc/init.d/unblockmusic <<'EOS'
+          #!/bin/sh /etc/rc.common
+          # UnblockNeteaseMusic (Go 版) - 从 QWRT 移植到 ImmortalWrt
+          # 原理：dnsmasq 把网易云域名解析结果写入 ipset "music"
+          #       iptables 把命中该 ipset 的 80 重定向到本机 5200（443 不劫持）
+
+          START=99
+          STOP=05
+          USE_PROCD=1
+
+          BIN=/usr/bin/UnblockNeteaseMusic
+          DIR=/usr/share/UnblockNeteaseMusicGo
+          LOG=/tmp/unblockmusic.log
+          CONF=/tmp/dnsmasq.d/dnsmasq-163.conf
+          CHAIN=CLOUD_MUSIC
+
+          IPT="/usr/sbin/iptables"
+
+          setup_ipset() {
+              ipset -! -N music hash:ip 2>/dev/null
+              ipset -F music 2>/dev/null
+          }
+
+          setup_dnsmasq() {
+              mkdir -p /tmp/dnsmasq.d
+              cat > "$CONF" <<'EOF'
+          ipset=/.music.163.com/music
+          ipset=/interface.music.163.com/music
+          ipset=/interface3.music.163.com/music
+          ipset=/apm.music.163.com/music
+          ipset=/apm3.music.163.com/music
+          ipset=/clientlog.music.163.com/music
+          ipset=/clientlog3.music.163.com/music
+          EOF
+              /etc/init.d/dnsmasq restart >/dev/null 2>&1
+              sleep 2
+          }
+
+          drop_jump() {
+              while $IPT -t nat -D PREROUTING -p tcp -m set --match-set music dst -j $CHAIN 2>/dev/null; do :; done
+          }
+
+          setup_iptables() {
+              drop_jump
+              $IPT -t nat -N $CHAIN 2>/dev/null
+              $IPT -t nat -F $CHAIN 2>/dev/null
+
+              for n in 0.0.0.0/8 10.0.0.0/8 127.0.0.0/8 169.254.0.0/16 \
+                       172.16.0.0/12 192.168.0.0/16 224.0.0.0/4 240.0.0.0/4; do
+                  $IPT -t nat -A $CHAIN -d $n -j RETURN
+              done
+              # 只劫持 80：实测 iOS 网易云接口走明文 HTTP，劫持 443 会因缺 CA 证书导致登录报错
+              $IPT -t nat -A $CHAIN -p tcp --dport 80 -j REDIRECT --to-ports 5200
+
+              # 插到 PREROUTING 最前，确保优先级高于 passwall 的 PSW 链
+              $IPT -t nat -I PREROUTING -p tcp -m set --match-set music dst -j $CHAIN
+
+              # 挡掉网易云的接口探测域名
+              $IPT -D OUTPUT -d 223.252.199.10 -j DROP 2>/dev/null
+              $IPT -I OUTPUT -d 223.252.199.10 -j DROP 2>/dev/null
+          }
+
+          start_service() {
+              [ -x "$BIN" ] || { logger -t unblockmusic "二进制不存在"; return 1; }
+
+              setup_ipset
+              setup_dnsmasq
+              setup_iptables
+
+              grep -q "Golang Version" "$LOG" 2>/dev/null || echo "$(date -R) # Start UnblockNeteaseMusic Golang Version (http:5200, https:5201)" > "$LOG"
+
+              procd_open_instance
+              procd_set_param command "$BIN" -o kuwo:kugou -b -p 5200 -sp 5201 \
+                  -c "$DIR/server.crt" -k "$DIR/server.key" -m 0 -e -sl 0 -l "$LOG"
+              procd_set_param respawn 3600 5 5
+              procd_set_param stdout 1
+              procd_set_param stderr 1
+              procd_close_instance
+          }
+
+          stop_service() {
+              drop_jump
+              $IPT -t nat -F $CHAIN 2>/dev/null
+              $IPT -t nat -X $CHAIN 2>/dev/null
+              $IPT -D OUTPUT -d 223.252.199.10 -j DROP 2>/dev/null
+              rm -f "$CONF"
+              /etc/init.d/dnsmasq restart >/dev/null 2>&1
+          }
+          EOS
+          chmod 755 files/etc/init.d/unblockmusic
+
+          # 开机自启（S99 排在 dnsmasq 之后；K05 负责关机清理规则）
+          mkdir -p files/etc/rc.d
+          ln -sf ../init.d/unblockmusic files/etc/rc.d/S99unblockmusic
+          ln -sf ../init.d/unblockmusic files/etc/rc.d/K05unblockmusic
+
+          echo "===== 音乐解锁注入结果 ====="
+          ls -l files/usr/bin/UnblockNeteaseMusic
+          ls -l files/usr/share/UnblockNeteaseMusicGo/
+          ls -l files/etc/rc.d/S99unblockmusic
+
+          # 闸门：文件在、可执行、脚本语法对、ELF 架构对（aarch64 = e_machine 0xb7）
+          test -x files/usr/bin/UnblockNeteaseMusic || { echo "❌ 音乐解锁无执行权限"; exit 1; }
+          sh -n files/etc/init.d/unblockmusic || { echo "❌ init 脚本语法错"; exit 1; }
+          MAGIC=$(od -An -tx1 -N20 files/usr/bin/UnblockNeteaseMusic | tr -d ' \n')
+          echo "ELF 头: $MAGIC"
+          case "$MAGIC" in
+            7f454c460201010000000000000000000200b700*) echo "  ✅ ELF64 aarch64" ;;
+            *) echo "❌ 不是 aarch64 ELF，下载可能被劫持或架构错误"; exit 1 ;;
+          esac
+          for f in files/usr/share/UnblockNeteaseMusicGo/server.crt \
+                   files/usr/share/UnblockNeteaseMusicGo/server.key \
+                   files/usr/share/UnblockNeteaseMusicGo/ca.crt; do
+            test -s "$f" || { echo "❌ 证书缺失: $f"; exit 1; }
+          done
+          echo "✅ 音乐解锁(Go) 注入完成；vlmcsd 由 CONFIG_PACKAGE_vlmcsd=y 编译进固件"
+
+      - name: 5.7 注入 gamefix、Argon 默认主题、KMS 开机配置
+        run: |
+          # gamefix：来自本仓库根目录（step 2.0 已 checkout 到 workspace 根）。
+          # 266 行不适合内联进 YAML，随仓库走更易维护。三个历史坑已在脚本里修好。
+          install -Dm755 ../gamefix.sh files/usr/bin/gamefix
+          sh -n files/usr/bin/gamefix || { echo "❌ gamefix 语法错误"; exit 1; }
+          test -x files/usr/bin/gamefix || { echo "❌ gamefix 权限错"; exit 1; }
+          echo "✅ gamefix 就位：$(wc -l < files/usr/bin/gamefix) 行"
+
+          # Argon 设为默认主题
+          cat > files/etc/uci-defaults/31-luci-argon <<'EOS'
+          #!/bin/sh
+          uci set luci.main.mediaurlbase='/luci-static/argon'
+          uci commit luci
+          exit 0
+          EOS
+          chmod +x files/etc/uci-defaults/31-luci-argon
+
+          # KMS：kms init 里 enabled 默认是 0，必须显式打开并 enable 自启。
+          # init 启动时会把 srv-host=_vlmcs._tcp,<hostname>,1688,0,100 写进 /etc/dnsmasq.conf，
+          # 局域网 Windows 可据此自动发现 KMS（仍需 DNS 后缀能解析）。
+          cat > files/etc/uci-defaults/32-vlmcsd <<'EOS'
+          #!/bin/sh
+          uci set vlmcsd.config=vlmcsd
+          uci set vlmcsd.config.enabled='1'
+          uci set vlmcsd.config.autoactivate='1'
+          uci commit vlmcsd
+          /etc/init.d/kms enable 2>/dev/null
+          exit 0
+          EOS
+          chmod +x files/etc/uci-defaults/32-vlmcsd
+
+          echo "===== 5.7 注入结果 ====="
+          ls -l files/usr/bin/gamefix
+          ls -l files/etc/uci-defaults/
+          for f in files/etc/uci-defaults/31-luci-argon files/etc/uci-defaults/32-vlmcsd; do
+            sh -n "$f" || { echo "❌ $f 语法错误"; exit 1; }
+          done
+          grep -q "mediaurlbase='/luci-static/argon'" files/etc/uci-defaults/31-luci-argon || { echo "❌ argon 默认主题未写入"; exit 1; }
+          grep -q "vlmcsd.config.enabled='1'" files/etc/uci-defaults/32-vlmcsd || { echo "❌ KMS 未设为开机启用"; exit 1; }
+          echo "✅ 5.7 完成"
+
       - name: 6. 下载源码包
         run: |
           make download -j8
@@ -275,7 +484,7 @@ jobs:
 
           echo "===== 镜像内关键组件核对 ====="
           FAIL=0
-          for p in luci-app-passwall xray-core shadowsocks-libev-ss-redir shadowsocksr-libev-ssr-redir luci-app-adblock luci-app-unblockneteasemusic node wifi-profile wifi-dats luci-app-mtk; do
+          for p in luci-app-passwall xray-core shadowsocks-libev-ss-redir shadowsocksr-libev-ssr-redir luci-app-adblock wifi-profile wifi-dats luci-app-mtk luci-app-vlmcsd luci-theme-argon; do
             if grep -q "^Package: ${p}$" out/packages-installed.txt 2>/dev/null; then
               echo "  ✅ ${p}"
             else
@@ -283,6 +492,40 @@ jobs:
               FAIL=1
             fi
           done
+          # 反向确认：node 版音乐解锁不该在包里
+          if grep -q "^Package: luci-app-unblockneteasemusic$" out/packages-installed.txt 2>/dev/null; then
+            echo "  ❌ 官方 node 版仍在包里（应为 Go 版注入）"; FAIL=1
+          else
+            echo "  ✅ 官方 node 版已排除"
+          fi
+
+          echo "===== files/ 注入项是否真的进了 rootfs ====="
+          ROOT=$(ls -d build_dir/target-*/root-mediatek 2>/dev/null | head -1)
+          if [ -n "$ROOT" ]; then
+            for f in usr/bin/UnblockNeteaseMusic usr/bin/vlmcsd usr/bin/gamefix \
+                     etc/init.d/unblockmusic etc/init.d/kms \
+                     etc/rc.d/S99unblockmusic \
+                     usr/share/UnblockNeteaseMusicGo/server.crt \
+                     www/luci-static/argon/css/cascade.css \
+                     etc/uci-defaults/99-zz-jcg-lan \
+                     etc/uci-defaults/31-luci-argon \
+                     etc/uci-defaults/32-vlmcsd \
+                     usr/share/passwall/rules/direct_ip; do
+              if [ -e "$ROOT/$f" ]; then
+                echo "  ✅ /$f"
+              else
+                echo "  ❌ /$f 未注入"
+                FAIL=1
+              fi
+            done
+            echo "--- 注入二进制的文件类型 ---"
+            file "$ROOT/usr/bin/UnblockNeteaseMusic" "$ROOT/usr/bin/vlmcsd" 2>/dev/null || true
+          else
+            echo "  ⚠️ 未找到 root 目录，跳过注入核对"
+          fi
+
+          [ "$FAIL" = "0" ] || { echo "❌ 关键组件核对未通过"; exit 1; }
+
           echo "--- 清单里的 LuCI 应用 ---"
           grep "^Package: luci-app-" out/packages-installed.txt | sed 's/Package: //' | tr '\n' ' ' || true
           echo
