@@ -71,27 +71,38 @@ jobs:
           test -f package/xray-core/files/geosite.dat || { echo "❌ 缺少 geosite.dat"; exit 1; }
           echo "✅ xray 预编译包就位"
 
-      - name: 4.6 型号改名为 Q30 Pro（只改显示名，不动 compatible）
+      - name: 4.6 型号改名为 Q30 Pro + 兼容 jcg,q30_pro 设备名
         run: |
-          # 硬件实际是 Q30 Pro，上游把型号写成了 Q30 / MR3000D-CIq。
-          # 这两处只影响界面与元数据里显示的名字：
+          # 硬件实际是 Q30 Pro，上游把型号写成了 Q30。
+          # 两处只影响界面与元数据里显示的名字：
           #   ① DTS 的 model      → /tmp/sysinfo/model，LuCI 顶栏显示的就是它
           #   ② image 的 DEVICE_MODEL → 镜像元数据里的 model 字段
-          # 关键的 compatible "jcg,q30" 与 SUPPORTED_DEVICES 一律保持原样，
-          # 否则 sysupgrade 会因为设备不匹配而拒绝刷机。
+          #
+          # SUPPORTED_DEVICES 追加 jcg,q30_pro 的原因：
+          #   sysupgrade 只用 /tmp/sysinfo/board_name 与本列表逐个比对
+          #   （见 /lib/upgrade/fwtool.sh 的 fwtool_check_image）。同一块板子
+          #   在不同固件里的命名并不统一：
+          #     ImmortalWrt 21.02          → jcg,q30
+          #     雕牌 QWRT R23.x            → jcg,q30_pro   ← 本次踩到
+          #     ImmortalWrt 23.05 ubootmod → jcg,q30-ubootmod（另一套布局，绝不能合并）
+          #   只写 jcg,q30 会让前者直接刷、后者被拒（必须 -F 强刷）。
+          #   合并 q30_pro 后两者都能直接刷，无需 -F。
           DTS=target/linux/mediatek/files-5.4/arch/arm64/boot/dts/mediatek/mt7981-jcg-q30.dts
+          MK=target/linux/mediatek/image/mt7981.mk
           sed -i 's|model = "[^"]*Q30[^"]*";|model = "JCG Q30 Pro";|' "$DTS"
-          sed -i 's|^  DEVICE_MODEL := Q30$|  DEVICE_MODEL := Q30 Pro|' target/linux/mediatek/image/mt7981.mk
+          sed -i 's|^  DEVICE_MODEL := Q30$|  DEVICE_MODEL := Q30 Pro|' "$MK"
+          sed -i 's|^  SUPPORTED_DEVICES := jcg,q30$|  SUPPORTED_DEVICES := jcg,q30 jcg,q30_pro|' "$MK"
 
           echo "===== 改名结果 ====="
           grep -n 'model = ' "$DTS"
-          grep -nE 'DEVICE_(VENDOR|MODEL|DTS)|SUPPORTED_DEVICES' target/linux/mediatek/image/mt7981.mk | sed -n '/Q30/,+3p'
-          # 闸门：型号必须改到，兼容串必须没被碰
+          grep -nE 'DEVICE_(VENDOR|MODEL|DTS)|SUPPORTED_DEVICES' "$MK" | sed -n '/Q30/,+4p'
+          # 闸门
           grep -q 'model = "JCG Q30 Pro";' "$DTS" || { echo "❌ DTS model 未改为 Q30 Pro"; exit 1; }
-          grep -q '^  DEVICE_MODEL := Q30 Pro$' target/linux/mediatek/image/mt7981.mk || { echo "❌ DEVICE_MODEL 未改为 Q30 Pro"; exit 1; }
+          grep -q '^  DEVICE_MODEL := Q30 Pro$' "$MK" || { echo "❌ DEVICE_MODEL 未改为 Q30 Pro"; exit 1; }
           grep -q 'compatible = "jcg,q30"' "$DTS" || { echo "❌ compatible 被误改，这会破坏 sysupgrade 兼容性"; exit 1; }
-          grep -q 'SUPPORTED_DEVICES := jcg,q30' target/linux/mediatek/image/mt7981.mk || { echo "❌ SUPPORTED_DEVICES 被误改"; exit 1; }
-          echo "✅ 型号已改为 Q30 Pro，兼容串保持 jcg,q30"
+          grep -q '^  SUPPORTED_DEVICES := jcg,q30 jcg,q30_pro$' "$MK" || { echo "❌ SUPPORTED_DEVICES 未同时兼容 jcg,q30 与 jcg,q30_pro"; exit 1; }
+          grep -A6 'define Device/jcg_q30$' "$MK" | grep -q 'ubootmod' && { echo "❌ jcg_q30 设备块混入 ubootmod（分区布局不同，会变砖）"; exit 1; }
+          echo "✅ 型号已改为 Q30 Pro，兼容 jcg,q30 + jcg,q30_pro，未混入 ubootmod"
 
       - name: 5. 生成配置（PassWall + 在用服务 + 广告拦截 + 音乐解锁）
         run: |
@@ -431,6 +442,46 @@ jobs:
           EOS
           chmod +x files/etc/uci-defaults/32-vlmcsd
 
+          echo "===== 5.7 注入结果 ====="
+          ls -l files/usr/bin/gamefix
+          ls -l files/etc/uci-defaults/
+          for f in files/etc/uci-defaults/31-luci-argon files/etc/uci-defaults/32-vlmcsd; do
+            sh -n "$f" || { echo "❌ $f 语法错误"; exit 1; }
+          done
+          grep -q "mediaurlbase='/luci-static/argon'" files/etc/uci-defaults/31-luci-argon || { echo "❌ argon 默认主题未写入"; exit 1; }
+          grep -q "vlmcsd.config.enabled='1'" files/etc/uci-defaults/32-vlmcsd || { echo "❌ KMS 未设为开机启用"; exit 1; }
+          echo "✅ 5.7 完成"
+
+      - name: 5.8 注入 wifiset、adblock 源预设、dawn 禁用
+        run: |
+          # 这套固件没有 UCI wireless，mtwifi.lua 只读 /etc/wireless/mediatek/*.dat，
+          # LuCI 无线页面因缺 /etc/config/wireless 连菜单都不显示。改 WiFi 唯一途径
+          # 是手改 .dat 的 4 个字段，而 AuthMode=WPA2PSK 与 EncrypType=NONE 的不匹配
+          # 会让驱动生成 RSN IE 失败、组播密钥退化成 WEP-40、beacon 作废 —— 表现为
+          # 客户端扫不到或报「无法加入」。wifiset 把 SSID/密码/认证/加密作为整体写入
+          # 并重启无线校验 CCMP，失败自动回滚。
+          install -Dm755 ../wifiset.sh files/usr/bin/wifiset
+          sh -n files/usr/bin/wifiset || { echo "❌ wifiset 语法错误"; exit 1; }
+          test -x files/usr/bin/wifiset || { echo "❌ wifiset 权限错"; exit 1; }
+          grep -q "EncrypType AES" files/usr/bin/wifiset || { echo "❌ wifiset 未强制写 EncrypType"; exit 1; }
+          echo "✅ wifiset 就位：$(wc -l < files/usr/bin/wifiset) 行"
+          echo "--- 用法自检（无参数应打印帮助并退出非 0）---"
+          if sh files/usr/bin/wifiset >/dev/null 2>&1; then
+            echo "❌ 无参数时未退出"; exit 1
+          else
+            echo "  ✅ 无参数时正常退出"
+          fi
+
+          # q30check：刷机前硬件指纹校验。sysupgrade 只认设备名，而同一块板子
+          # 在不同固件里可能被命名为 jcg,q30 / jcg,q30_pro / jcg,q30-ubootmod，
+          # 名字判断不了「这到底是不是同一块硬件、是不是同一套分区布局」。
+          # 本脚本直接读 SoC + NAND 容量 + MTD 分区表做比对，ubootmod 布局直接拒绝。
+          install -Dm755 ../q30check.sh files/usr/bin/q30check
+          sh -n files/usr/bin/q30check || { echo "❌ q30check 语法错误"; exit 1; }
+          test -x files/usr/bin/q30check || { echo "❌ q30check 权限错"; exit 1; }
+          grep -q 'ubootmod' files/usr/bin/q30check || { echo "❌ q30check 未处理 ubootmod 布局"; exit 1; }
+          echo "✅ q30check 就位：$(wc -l < files/usr/bin/q30check) 行"
+
           # adblock 规则源预设：21.02 的 adblock 4.1.3 里中国规则源叫 reg_cn，
           # 不叫 easylistchina（写错会被静默丢弃）。anti_ad 是广告主库。
           cat > files/etc/uci-defaults/33-adblock-src <<'EOS'
@@ -456,34 +507,14 @@ jobs:
           EOS
           chmod +x files/etc/uci-defaults/34-dawn-off
 
-          echo "===== 5.7 注入结果 ====="
-          ls -l files/usr/bin/gamefix
-          ls -l files/etc/uci-defaults/
-          for f in files/etc/uci-defaults/31-luci-argon files/etc/uci-defaults/32-vlmcsd \
-                   files/etc/uci-defaults/33-adblock-src files/etc/uci-defaults/34-dawn-off; do
+          echo "===== 5.8 注入结果 ====="
+          ls -l files/usr/bin/wifiset files/etc/uci-defaults/
+          for f in files/etc/uci-defaults/33-adblock-src files/etc/uci-defaults/34-dawn-off; do
             sh -n "$f" || { echo "❌ $f 语法错误"; exit 1; }
           done
-          grep -q "mediaurlbase='/luci-static/argon'" files/etc/uci-defaults/31-luci-argon || { echo "❌ argon 默认主题未写入"; exit 1; }
-          grep -q "vlmcsd.config.enabled='1'" files/etc/uci-defaults/32-vlmcsd || { echo "❌ KMS 未设为开机启用"; exit 1; }
           grep -q "reg_cn" files/etc/uci-defaults/33-adblock-src || { echo "❌ adblock 中国源未预设"; exit 1; }
           grep -q "init.d/dawn disable" files/etc/uci-defaults/34-dawn-off || { echo "❌ dawn 未禁用"; exit 1; }
-          echo "✅ 5.7 完成"
-
-      - name: 5.8 注入 wifiset 无线配置工具
-        run: |
-          # 这套固件没有 UCI wireless，mtwifi.lua 只读 /etc/wireless/mediatek/*.dat，
-          # LuCI 无线页面因缺 /etc/config/wireless 连菜单都不显示。改 WiFi 唯一途径
-          # 是手改 .dat 的 4 个字段，而 AuthMode=WPA2PSK 与 EncrypType=NONE 的不匹配
-          # 会让驱动生成 RSN IE 失败、组播密钥退化成 WEP-40、beacon 作废 —— 表现为
-          # 客户端扫不到或报「无法加入」。wifiset 把 SSID/密码/认证/加密作为整体写入
-          # 并重启无线校验 CCMP，失败自动回滚。
-          install -Dm755 ../wifiset.sh files/usr/bin/wifiset
-          sh -n files/usr/bin/wifiset || { echo "❌ wifiset 语法错误"; exit 1; }
-          test -x files/usr/bin/wifiset || { echo "❌ wifiset 权限错"; exit 1; }
-          grep -q "EncrypType AES" files/usr/bin/wifiset || { echo "❌ wifiset 未强制写 EncrypType"; exit 1; }
-          echo "✅ wifiset 就位：$(wc -l < files/usr/bin/wifiset) 行"
-          echo "--- 用法自检（无参数应打印帮助并退出 1）---"
-          sh files/usr/bin/wifiset >/dev/null 2>&1 || echo "  ✅ 无参数时正常退出"
+          echo "✅ 5.8 完成"
 
       - name: 6. 下载源码包
         run: |
@@ -546,7 +577,7 @@ jobs:
           echo "===== files/ 注入项是否真的进了 rootfs ====="
           ROOT=$(ls -d build_dir/target-*/root-mediatek 2>/dev/null | head -1)
           if [ -n "$ROOT" ]; then
-            for f in usr/bin/UnblockNeteaseMusic usr/bin/vlmcsd usr/bin/gamefix usr/bin/wifiset \
+            for f in usr/bin/UnblockNeteaseMusic usr/bin/vlmcsd usr/bin/gamefix usr/bin/wifiset usr/bin/q30check \
                      etc/init.d/unblockmusic etc/init.d/kms \
                      etc/rc.d/S99unblockmusic \
                      usr/share/UnblockNeteaseMusicGo/server.crt \

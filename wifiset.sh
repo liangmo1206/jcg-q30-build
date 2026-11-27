@@ -73,7 +73,7 @@ do_show() {
         printf '  EncrypType: %s\n' "$(get_kv "$f" EncrypType)"
         printf '  Channel   : %s (AutoChannelSelect=%s)\n' \
             "$(get_kv "$f" Channel)" "$(get_kv "$f" AutoChannelSelect)"
-        iwinfo "$i" info 2>/dev/null | sed -n 's/^ *\(ESSID\|Channel\|Bit Rate\|Encryption\):/\1:/p' | sed 's/^/  驱动: /'
+        iwinfo "$i" info 2>/dev/null | grep -oE '(ESSID|Channel|Bit Rate|Encryption): .*' | sed 's/^/  驱动: /'
     done
     echo
 }
@@ -93,7 +93,8 @@ apply_and_verify() {
 
         n=0
         while [ $n -lt 25 ]; do
-            cur=$(iwinfo "$i" info 2>/dev/null | sed -n 's/^ *ESSID: "\(.*\)"$/\1/p')
+            # iwinfo 首行是「接口名 + ESSID」，所以不能用 ^ 锚定
+            cur=$(iwinfo "$i" info 2>/dev/null | sed -n 's/.*ESSID: "\(.*\)"$/\1/p' | head -1)
             [ "$cur" = "$want_ssid" ] && break
             sleep 1; n=$((n + 1))
         done
@@ -102,7 +103,7 @@ apply_and_verify() {
             FAIL=1; continue
         fi
 
-        enc=$(iwinfo "$i" info 2>/dev/null | sed -n 's/^ *Encryption: //p')
+        enc=$(iwinfo "$i" info 2>/dev/null | sed -n 's/.*Encryption: //p' | head -1)
         case "$want_auth" in
             OPEN)
                 ok "$i 开放网络已生效（$enc）" ;;
