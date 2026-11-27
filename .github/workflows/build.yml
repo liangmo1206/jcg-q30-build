@@ -111,9 +111,17 @@ jobs:
           # 该文件 631KB（每块内嵌 base64 图标），不适合用 files/ 覆盖，只能改源码。
           # Instagram 在国内直连不通，这个检测必然失败、常驻红点，属于无效提示；
           # 删掉后剩三块，宽度类同步 1/4 → 1/3，保持一行排满。
-          F=$(find feeds package/feeds -path '*luci-app-passwall/root/usr/lib/lua/luci/view/passwall/global/status.htm' 2>/dev/null | head -1)
-          [ -n "$F" ] || { echo "❌ 找不到 passwall 的 status.htm"; exit 1; }
+          F=$(find feeds package -path '*passwall/global/status.htm' 2>/dev/null | head -1)
+          if [ -z "$F" ]; then
+            echo "❌ 找不到 passwall 的 status.htm，候选如下："
+            find . -maxdepth 8 -name 'status.htm' -path '*passwall*' 2>/dev/null | head -5
+            echo "--- feeds 目录 ---"
+            ls feeds 2>/dev/null | head -20
+            exit 1
+          fi
           echo "target: $F"
+          # 防呆：确认选中的确实是带连接检测的那个文件（luasrc 与 root 两种布局都可能有）
+          grep -q 'check_connect' "$F" || { echo "❌ 该文件不含连接检测代码，路径可能选错"; exit 1; }
           python3 ../passwall-patch.py "$F"
           grep -q instagram "$F" && { echo "❌ instagram 块未删干净"; exit 1; }
           N=$(grep -oE "check_connect\('[a-z]+'" "$F" | sort -u | wc -l)
