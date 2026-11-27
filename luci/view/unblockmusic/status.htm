@@ -1,0 +1,99 @@
+<%+header%>
+
+<h2 name="content"><%:音乐解锁%></h2>
+
+<%
+	local sys = luci.sys
+
+	local function esc(s)
+		return (tostring(s or ""):gsub("[&<>\"']", {
+			["&"] = "&amp;", ["<"] = "&lt;", [">"] = "&gt;",
+			["\""] = "&quot;", ["'"] = "&#39;"
+		}))
+	end
+
+	local running = (sys.call("pgrep -f '[U]nblockNeteaseMusic' >/dev/null") == 0)
+	local enabled = (sys.call("/etc/init.d/unblockmusic enabled >/dev/null") == 0)
+	local entries = (sys.exec("ipset list music 2>/dev/null | awk '/Number of entries/{print $4}'") or ""):match("%d+") or "0"
+	local chain   = (sys.exec("iptables -t nat -S CLOUD_MUSIC 2>/dev/null | grep -c 'dport 80'") or ""):match("%d+") or "0"
+	local logtxt  = esc(sys.exec("tail -n 6 /tmp/unblockmusic.log 2>/dev/null"))
+	local acturl  = url("admin", "services", "unblockmusic", "action")
+	local tk      = luci.dispatcher.context.authtoken or ""
+%>
+
+<fieldset class="cbi-section">
+	<legend><%:运行状态%></legend>
+	<table class="cbi-section-table">
+		<tr class="cbi-section-table-row">
+			<td class="cbi-value-title"><%:服务进程%></td>
+			<td class="cbi-value-field">
+				<% if running then %>
+					<em style="color:#2e7d32;font-weight:bold"><%:运行中%></em>
+				<% else %>
+					<em style="color:#c62828;font-weight:bold"><%:未运行%></em>
+				<% end %>
+			</td>
+		</tr>
+		<tr class="cbi-section-table-row">
+			<td class="cbi-value-title"><%:开机自启%></td>
+			<td class="cbi-value-field">
+				<% if enabled then %>
+					<em style="color:#2e7d32;font-weight:bold"><%:已启用%></em>
+				<% else %>
+					<em style="color:#c62828;font-weight:bold"><%:已禁用%></em>
+				<% end %>
+			</td>
+		</tr>
+		<tr class="cbi-section-table-row">
+			<td class="cbi-value-title"><%:代理端口%></td>
+			<td class="cbi-value-field">5200 (HTTP) / 5201 (TLS)</td>
+		</tr>
+		<tr class="cbi-section-table-row">
+			<td class="cbi-value-title"><%:劫持链 CLOUD_MUSIC%></td>
+			<td class="cbi-value-field">
+				<%= chain %> <%:条 80 端口重定向%>
+			</td>
+		</tr>
+		<tr class="cbi-section-table-row">
+			<td class="cbi-value-title"><%:ipset 已解析 IP%></td>
+			<td class="cbi-value-field"><%= entries %> <%:条%></td>
+		</tr>
+		<tr class="cbi-section-table-row">
+			<td class="cbi-value-title"><%:上游音源%></td>
+			<td class="cbi-value-field">kuwo / kugou</td>
+		</tr>
+	</table>
+</fieldset>
+
+<fieldset class="cbi-section">
+	<legend><%:操作%></legend>
+	<div style="padding:6px 0">
+		<form method="post" action="<%=acturl%>" style="display:inline-block;margin-right:6px">
+			<input type="hidden" name="token" value="<%=tk%>" />
+			<input type="hidden" name="act" value="restart" />
+			<button type="submit" class="cbi-button cbi-button-apply"><%:重启服务%></button>
+		</form>
+		<form method="post" action="<%=acturl%>" style="display:inline-block;margin-right:6px">
+			<input type="hidden" name="token" value="<%=tk%>" />
+			<input type="hidden" name="act" value="start" />
+			<button type="submit" class="cbi-button cbi-button-action"><%:启动%></button>
+		</form>
+		<form method="post" action="<%=acturl%>" style="display:inline-block;margin-right:6px">
+			<input type="hidden" name="token" value="<%=tk%>" />
+			<input type="hidden" name="act" value="stop" />
+			<button type="submit" class="cbi-button cbi-button-reset"><%:停止%></button>
+		</form>
+		<form method="post" action="<%=acturl%>" style="display:inline-block;margin-right:6px">
+			<input type="hidden" name="token" value="<%=tk%>" />
+			<input type="hidden" name="act" value="<%=enabled and "disable" or "enable"%>" />
+			<button type="submit" class="cbi-button cbi-button-reset"><% if enabled then %><%:禁用开机自启%><% else %><%:启用开机自启%><% end %></button>
+		</form>
+	</div>
+</fieldset>
+
+<fieldset class="cbi-section">
+	<legend><%:最近日志%></legend>
+	<pre style="padding:8px;overflow:auto;max-height:200px;font-size:12px"><%=logtxt%></pre>
+</fieldset>
+
+<%+footer%>

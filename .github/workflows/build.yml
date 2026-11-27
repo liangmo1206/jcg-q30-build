@@ -244,6 +244,13 @@ jobs:
           uci set dhcp.lan.start='100'
           uci set dhcp.lan.limit='150'
           uci commit dhcp
+
+          # 主机名固定为固件默认值。sysupgrade 默认保留 /etc/config（SAVE_CONFIG=1），
+          # 从第三方固件刷过来时旧主机名会跟着恢复包一起带进来，LuCI 左上角就显示成
+          # 别的名字（如 JCG-AP / QWRT）。这里无条件覆盖，保证三台显示一致。
+          [ -n "$(uci -q get system.@system[0])" ] || uci add system system >/dev/null
+          uci set system.@system[0].hostname='ImmortalWrt'
+          uci commit system
           exit 0
           EOS
           chmod +x files/etc/uci-defaults/99-zz-jcg-lan
@@ -265,6 +272,11 @@ jobs:
           cat files/etc/uci-defaults/99-zz-jcg-lan
           echo "--- direct_ip ---"
           cat files/usr/share/passwall/rules/direct_ip
+
+          # 闸门：主机名必须固定，否则从第三方固件刷过来会沿用旧名字
+          sh -n files/etc/uci-defaults/99-zz-jcg-lan || { echo "❌ 99-zz-jcg-lan 语法错误"; exit 1; }
+          grep -q "hostname='ImmortalWrt'" files/etc/uci-defaults/99-zz-jcg-lan || { echo "❌ 主机名未固定为 ImmortalWrt"; exit 1; }
+          echo "✅ 主机名固定为 ImmortalWrt"
 
           # 让以后的每次 sysupgrade 都保留 /etc/wireless/（SSID/信道/功率全在这里）。
           # 现固件本来就带这条 keep 规则，所以这次刷机不会丢；写进新固件是为了以后不再依赖旧系统。
@@ -516,6 +528,39 @@ jobs:
           grep -q "init.d/dawn disable" files/etc/uci-defaults/34-dawn-off || { echo "❌ dawn 未禁用"; exit 1; }
           echo "✅ 5.8 完成"
 
+      - name: 5.9 注入音乐解锁 LuCI 页面
+        run: |
+          # 音乐解锁是 files/ 覆盖层注入的二进制 + init 脚本，不是软件包，
+          # 21.02 的 feed 里也没有对应的 luci-app-unblockmusic（opkg list 为空），
+          # 所以「服务」菜单里原本看不到它，只能 SSH 敲命令管理。
+          # 这里补一个自制页面，三条路由：
+          #   admin/services/unblockmusic        页面（状态 + 按钮 + 日志）
+          #   admin/services/unblockmusic/status JSON，供前端轮询
+          #   admin/services/unblockmusic/action POST，动作入口
+          # 注意：页面模板里只能用 luci.sys / nixio 这类全局对象，不能写
+          # require "luci.sys"，在 module(package.seeall) 环境下会拿到 nil，
+          # 实测会让整个菜单渲染 500。
+          mkdir -p files/usr/lib/lua/luci/controller \
+                   files/usr/lib/lua/luci/view/unblockmusic
+          cp ../luci/unblockmusic.lua               files/usr/lib/lua/luci/controller/unblockmusic.lua
+          cp ../luci/view/unblockmusic/status.htm   files/usr/lib/lua/luci/view/unblockmusic/status.htm
+          chmod 644 files/usr/lib/lua/luci/controller/unblockmusic.lua \
+                    files/usr/lib/lua/luci/view/unblockmusic/status.htm
+
+          echo "===== 5.9 注入结果 ====="
+          ls -l files/usr/lib/lua/luci/controller/unblockmusic.lua \
+                files/usr/lib/lua/luci/view/unblockmusic/status.htm
+          # 闸门：菜单注册、CSRF 校验、模板必须存在且引用了正确的动作地址
+          grep -q '"admin", "services", "unblockmusic"' files/usr/lib/lua/luci/controller/unblockmusic.lua \
+            || { echo "❌ 控制器未注册到 services 菜单"; exit 1; }
+          grep -q 'test_post_security' files/usr/lib/lua/luci/controller/unblockmusic.lua \
+            || { echo "❌ 动作入口缺 CSRF 校验"; exit 1; }
+          grep -q 'require "luci' files/usr/lib/lua/luci/controller/unblockmusic.lua \
+            && { echo '❌ 控制器里出现 require "luci.*"，会导致菜单 500'; exit 1; } || true
+          grep -q '"services", "unblockmusic", "action"' files/usr/lib/lua/luci/view/unblockmusic/status.htm \
+            || { echo "❌ 模板未引用动作地址"; exit 1; }
+          echo "✅ 5.9 完成"
+
       - name: 6. 下载源码包
         run: |
           make download -j8
@@ -587,6 +632,8 @@ jobs:
                      etc/uci-defaults/32-vlmcsd \
                      etc/uci-defaults/33-adblock-src \
                      etc/uci-defaults/34-dawn-off \
+                     usr/lib/lua/luci/controller/unblockmusic.lua \
+                     usr/lib/lua/luci/view/unblockmusic/status.htm \
                      usr/share/passwall/rules/direct_ip; do
               if [ -e "$ROOT/$f" ]; then
                 echo "  ✅ /$f"
