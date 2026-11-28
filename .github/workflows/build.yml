@@ -263,20 +263,43 @@ jobs:
 
           cat > files/etc/uci-defaults/99-zz-jcg-lan <<'EOS'
           #!/bin/sh
-          # LAN 地址与本机现状保持一致（zz 开头，排在 default-settings 之后执行）
-          uci set network.lan.ipaddr='192.168.123.1'
-          uci set network.lan.netmask='255.255.255.0'
-          uci commit network
-          uci set dhcp.lan.start='100'
-          uci set dhcp.lan.limit='150'
-          uci commit dhcp
+          # LAN 默认地址：只负责"首次开机把设备摆到一个已知地址"，不负责"这就是最终地址"。
+          # 一旦地址被人改过就永不覆盖 —— 之前 AP 每次 sysupgrade 都被改回 .1，两次失联。
+          #
+          # 为什么默认不是 .1：.1 是主力机地址。两台同时以 .1 开机 = 同网段双 .1，
+          # ARP 互撞，两台都"活着但不响应"，只能靠 IPv6 链路本地地址救。
+          # .30 在 DHCP 池（100-249）之外，不和租约撞，也不和 AP(.10)/备用机(.20) 撞，
+          # 并行刷两台时也不会互抢。
+          Q30_DEFAULT_IP='192.168.123.30'
+          Q30_STOCK_IP='192.168.1.1'
 
-          # 主机名固定为固件默认值。sysupgrade 默认保留 /etc/config（SAVE_CONFIG=1），
-          # 从第三方固件刷过来时旧主机名会跟着恢复包一起带进来，LuCI 左上角就显示成
-          # 别的名字（如 JCG-AP / QWRT）。这里无条件覆盖，保证三台显示一致。
-          [ -n "$(uci -q get system.@system[0])" ] || uci add system system >/dev/null
-          uci set system.@system[0].hostname='ImmortalWrt'
-          uci commit system
+          cur="$(uci -q get network.lan.ipaddr)"
+          case "$cur" in
+            ''|"$Q30_STOCK_IP")
+              uci set network.lan.proto='static'
+              uci set network.lan.ipaddr="$Q30_DEFAULT_IP"
+              uci set network.lan.netmask='255.255.255.0'
+              uci commit network
+              uci set dhcp.lan.start='100'
+              uci set dhcp.lan.limit='150'
+              uci commit dhcp
+              echo "[q30] LAN 首次落地 -> $Q30_DEFAULT_IP"
+              ;;
+            *)
+              echo "[q30] LAN 已是 $cur，保留不动"
+              ;;
+          esac
+
+          # 主机名只纠正"从别的固件带过来的名字"，用户改过的名字不再覆盖
+          # （否则 AP 改名成 Q30-AP 后，每次升级都会被改回 ImmortalWrt）。
+          hn="$(uci -q get system.@system[0].hostname)"
+          case "$hn" in
+            ''|OpenWrt|LEDE|ImmortalWrt|JCG-AP|QWRT|Kwrt|OpenWrt-*|LEDE-*)
+              [ -n "$(uci -q get system.@system[0])" ] || uci add system system >/dev/null
+              uci set system.@system[0].hostname='ImmortalWrt'
+              uci commit system
+              ;;
+          esac
           exit 0
           EOS
           chmod +x files/etc/uci-defaults/99-zz-jcg-lan
@@ -299,10 +322,18 @@ jobs:
           echo "--- direct_ip ---"
           cat files/usr/share/passwall/rules/direct_ip
 
-          # 闸门：主机名必须固定，否则从第三方固件刷过来会沿用旧名字
+          # 闸门：默认地址必须是 .30；且必须带"已配置就不覆盖"的判断
           sh -n files/etc/uci-defaults/99-zz-jcg-lan || { echo "❌ 99-zz-jcg-lan 语法错误"; exit 1; }
-          grep -q "hostname='ImmortalWrt'" files/etc/uci-defaults/99-zz-jcg-lan || { echo "❌ 主机名未固定为 ImmortalWrt"; exit 1; }
-          echo "✅ 主机名固定为 ImmortalWrt"
+          grep -q "Q30_DEFAULT_IP='192.168.123.30'" files/etc/uci-defaults/99-zz-jcg-lan \
+            || { echo "❌ 默认 LAN 不是 192.168.123.30"; exit 1; }
+          if grep -q "ipaddr='192.168.123.1'" files/etc/uci-defaults/99-zz-jcg-lan; then
+            echo "❌ 仍有写死 .1 的代码，会与主力机地址冲突"; exit 1
+          fi
+          grep -q "Q30_STOCK_IP" files/etc/uci-defaults/99-zz-jcg-lan \
+            || { echo "❌ 缺少已配置就不覆盖的判断"; exit 1; }
+          grep -q "hostname='ImmortalWrt'" files/etc/uci-defaults/99-zz-jcg-lan \
+            || { echo "❌ 主机名未纳入纠正"; exit 1; }
+          echo "✅ 默认 .30 + 不覆盖已配置地址 + 主机名只纠正外来值"
 
           # 让以后的每次 sysupgrade 都保留 /etc/wireless/（SSID/信道/功率全在这里）。
           # 现固件本来就带这条 keep 规则，所以这次刷机不会丢；写进新固件是为了以后不再依赖旧系统。
